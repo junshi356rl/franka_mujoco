@@ -8,7 +8,7 @@ import torch
 
 sys.path.append(os.path.abspath(os.path.join(__file__, "../../../../")))
 from panda_mujoco_gym.envs.push import FrankaPushEnv
-from utils import QNet, action_forward, ObsNormalizer
+from utils import MLP, action_forward, ObsNormalizer
 
 
 def make_obs(state):
@@ -25,8 +25,14 @@ def evaluate(actor_path,
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     env = FrankaPushEnv(reward_type=reward_type, render_mode=render_mode)
     obs_normalizer = ObsNormalizer(dim=state_size)
-
-    actor = QNet(state_size, action_size, [64, 64], action_size * 2).to(device)
+    # Load ObsNormalizer state
+    normalizer_path = os.path.join(os.path.dirname(actor_path), 'ppo_push_normalizer.pkl')
+    if os.path.exists(normalizer_path):
+        obs_normalizer = ObsNormalizer.load(normalizer_path)
+        print(f"Loaded ObsNormalizer from {normalizer_path}")
+    else:
+        print(f"Warning: ObsNormalizer not found at {normalizer_path}, using default")
+    actor = MLP(state_size, action_size, [128, 64], action_size * 2).to(device)
     actor.load_state_dict(torch.load(actor_path, map_location=device))
     actor.eval()
 
@@ -34,7 +40,6 @@ def evaluate(actor_path,
     for ep in range(1, num_episodes + 1):
         state, _ = env.reset()
         obs_np = make_obs(state)
-        obs_normalizer.update(obs_np[np.newaxis, :])
         obs = torch.tensor(obs_np, dtype=torch.float32, device=device)
         obs_norm = obs_normalizer.normalize(obs)
 
@@ -52,7 +57,6 @@ def evaluate(actor_path,
             success = info.get('is_success', False) or success
 
             obs_np = make_obs(state)
-            obs_normalizer.update(obs_np[np.newaxis, :])
             obs = torch.tensor(obs_np, dtype=torch.float32, device=device)
             obs_norm = obs_normalizer.normalize(obs)
 

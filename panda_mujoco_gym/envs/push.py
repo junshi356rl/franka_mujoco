@@ -17,7 +17,7 @@ class FrankaPushEnv(FrankaEnv):
             reward_type=reward_type,
             block_gripper=True,
             distance_threshold=0.05,
-            goal_xy_range=0.2,
+            goal_xy_range=0.15,
             obj_xy_range=0.1,
             goal_x_offset=0.2,
             goal_z_range=0.0,

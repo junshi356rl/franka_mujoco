@@ -1,28 +1,32 @@
-import sys
-import os
-import time
+import collections
 import glob
+import os
+import sys
+import time
+from typing import List
+import pandas as pd
+import numpy as np
+import torch
+
 sys.path.append(os.path.abspath(os.path.join(__file__, "../../../../")))
 from panda_mujoco_gym.envs.push import FrankaPushEnv
-from utils import get_action_sample, QNet, get_action_sample, get_action_prob, ObsNormalizer, action_forward
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-import pandas as pd
-import collections
 
-torch.autograd.set_detect_anomaly(True) 
+from utils import (
+    MLP, 
+    ObsNormalizer, 
+    get_action_sample, 
+    get_action_prob, 
+    action_forward,
+    plot_batch_success_rate,
+)
 
-def compute_rtgs(reward_his, gamma):
-    rtgs = 0
-    rtgs_his = []
-    for rew in reversed(reward_his):
-        rtgs = rew + rtgs * gamma
-        rtgs_his.append(rtgs)
-    rtgs_his.reverse()
-    return rtgs_his
-
-def compute_gae_advantage(reward_his, state_his, gae_lambda, gamma, critic, truncated, dev):
+def compute_gae_advantage(reward_his: List[float], 
+                          state_his: List[torch.Tensor], 
+                          gae_lambda: float, 
+                          gamma: float, 
+                          critic: MLP, 
+                          is_truncated: bool, 
+                          dev: torch.device):
     # Assume the rollout has T steps
     # reward_his: reward from 0 to T
     # state_his_extended: reward from 0 to T + 1 (included the state after the last step)
@@ -34,7 +38,7 @@ def compute_gae_advantage(reward_his, state_his, gae_lambda, gamma, critic, trun
     for i in range(len(reward_his)):
         if i < (len(reward_his) - 1):
             old_value_next = old_value_his[i+1]
-        elif truncated:
+        elif is_truncated:
             old_value_next = old_value_his[i+1]
         else:
             old_value_next = 0
@@ -49,20 +53,6 @@ def compute_gae_advantage(reward_his, state_his, gae_lambda, gamma, critic, trun
     gae_advantage_his.reverse()
     return gae_advantage_his, old_value_his[:-1]
 
-def plot_batch_success_rate(batch_success_rate_his, output_path=None):
-    plt.figure(figsize=(8, 4))
-    plt.plot(batch_success_rate_his, marker='o', linewidth=1)
-    plt.title('Batch Success Rate')
-    plt.xlabel('Batch Index')
-    plt.ylabel('Success Rate')
-    plt.grid(True, linestyle='--', alpha=0.5)
-    plt.ylim(0.0, 1.0)
-    if output_path is not None:
-        plt.savefig(output_path, bbox_inches='tight')
-    else:
-        plt.show()
-    plt.close()
-
 def get_custom_reward(obs, env_reward):
     ee_position = obs[:3]
     object_position = obs[6:9]
@@ -70,8 +60,7 @@ def get_custom_reward(obs, env_reward):
     custom_reward = -dist + env_reward  # Combine with env reward to encourage both reaching and pushing
     return custom_reward
 
-
-def rollout(env: FrankaPushEnv, actor: QNet, critic: QNet, batch_steps, rollout_max_step, 
+def rollout(env: FrankaPushEnv, actor: MLP, critic: MLP, batch_steps, rollout_max_step, 
             action_size, gamma, dev, obs_normalizer: ObsNormalizer, gae_lambda:int):
     batch_state_his = []
     batch_action_his = []
@@ -91,22 +80,17 @@ def rollout(env: FrankaPushEnv, actor: QNet, critic: QNet, batch_steps, rollout_
         cur_state, _ = env.reset()
         rollout_step = 0
         cur_obs_np = np.concatenate([cur_state['observation'], cur_state['desired_goal']])
-        # obs_normalizer.update(cur_obs_np[np.newaxis, :])
         cur_obs = obs_normalizer.normalize(torch.tensor(cur_obs_np, device=dev, dtype=torch.float32))
         while rollout_step < rollout_max_step:
-            # env.render()
-            actor_outout = action_forward(actor, cur_obs)
-            actor_distribution_mean = actor_outout[:action_size]
-            actor_distribution_log_std = actor_outout[action_size:]
+            actor_output = action_forward(actor, cur_obs)
+            actor_distribution_mean = actor_output[:action_size]
+            actor_distribution_log_std = actor_output[action_size:]
             action, log_prob = get_action_sample(actor_distribution_mean, actor_distribution_log_std)
             state_his.append(cur_obs)
-            xyz_action =  np.append(action.cpu().numpy(), 0.03)  # For push task, we only control x and y, keep z action as 0.00
+            xyz_action =  np.append(action.cpu().numpy(), 0.03)  # For push task, we only control x and y, keep z action as 0.03
             cur_state, env_reward, terminated, truncated, _ = env.step(xyz_action)
-            reward = get_custom_reward(cur_obs_np, env_reward)
-            # if rollout_step % 20 == 0:
-            #     print(f"  [DEBUG] Step {rollout_step}: Action {action.cpu().numpy()}, Reward {reward:.3f}, Terminated {terminated}, Truncated {truncated}")
-
             cur_obs_np = np.concatenate([cur_state['observation'], cur_state['desired_goal']])
+            reward = get_custom_reward(cur_obs_np, env_reward)
             obs_normalizer.update(cur_obs_np[np.newaxis, :])
             cur_obs = obs_normalizer.normalize(torch.tensor(cur_obs_np, device=dev, dtype=torch.float32))
             action_his.append(action)
@@ -118,7 +102,6 @@ def rollout(env: FrankaPushEnv, actor: QNet, critic: QNet, batch_steps, rollout_
 
             if terminated:
                 success_rollout_count += 1
-                # print(f"  [SUCCESS] Rollout {rollout_count} succeeded at step {rollout_step}")
                 break
             elif truncated:
                 break
@@ -129,7 +112,6 @@ def rollout(env: FrankaPushEnv, actor: QNet, critic: QNet, batch_steps, rollout_
             reward_his, state_his+[cur_obs], gae_lambda, gamma, critic, truncated, dev)
         batch_gae_advantage_his.extend(gae_advantage_his)
         batch_old_value_his.extend(old_value_his)
-
 
         batch_state_his.extend(state_his)
         batch_action_his.extend(action_his)
@@ -158,17 +140,16 @@ if __name__ == "__main__":
     gamma = 0.99
     gae_lambda = 0.95
     batch_steps = 2000
-    train_total_steps = 5000000
+    train_total_steps = 2500000
     n_updates = 3
     eps = 0.2
     actor_lr = 3e-4
     critic_lr = 1e-3
     entropy_coef = 0.01
     env = FrankaPushEnv(reward_type=reward_type)
-    # env = FrankaPushEnv(reward_type=reward_type, render_mode="human")
     obs_normalizer = ObsNormalizer(dim=state_size)
-    actor = QNet(state_size, action_size, [128, 64], action_size * 2).to(torch.device("cuda")) # Actor output is mean and std of the action distribution
-    critic = QNet(state_size, action_size, [128, 64], 1).to(torch.device("cuda"))
+    actor = MLP(state_size, action_size, [128, 64], action_size * 2).to(torch.device("cuda")) # Actor output is mean and std of the action distribution
+    critic = MLP(state_size, action_size, [128, 64], 1).to(torch.device("cuda"))
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=actor_lr)
     critic_optimizer = torch.optim.Adam(critic.parameters(), lr=critic_lr)
     total_batches = train_total_steps // batch_steps
@@ -188,7 +169,8 @@ if __name__ == "__main__":
     std_history = collections.deque(maxlen=20)
     # Main loop of PPO
 
-    ENTROPY_CONST = 0.5 * (1.0 + np.log(2 * np.pi))
+    # Entropy for diagonal Gaussian: 0.5 * sum(1 + log(2π) + 2*log_std), extract the constant part for later calculation to save time
+    GAUSSIAN_ENTROPY_OFFSET = 0.5 * (1.0 + np.log(2 * np.pi))
 
     total_steps = 0
     sample_batch_count = 0
@@ -207,9 +189,9 @@ if __name__ == "__main__":
         kl_list, clip_list = [], []
         for i_updates in range(n_updates):
             old_log_prob = batch_log_prob.detach()
-            actor_outout = action_forward(actor,batch_state)
-            mean = actor_outout[:, :action_size]
-            log_std = actor_outout[:, action_size:]
+            actor_output = action_forward(actor,batch_state)
+            mean = actor_output[:, :action_size]
+            log_std = actor_output[:, action_size:]
 
             new_log_prob = get_action_prob(mean, log_std, batch_action)
             rt = torch.exp(new_log_prob - old_log_prob)
@@ -224,7 +206,7 @@ if __name__ == "__main__":
                 rt * A,
                 torch.clamp(rt, 1 - eps, 1 + eps) * A
             )).mean()
-            entropy = (ENTROPY_CONST + log_std).sum(dim=-1)
+            entropy = (GAUSSIAN_ENTROPY_OFFSET + log_std).sum(dim=-1)
             # Calculate the Critic loss MSE(V, rtgs)
             V = critic.forward(batch_state).squeeze()
             # GAE Advantage
@@ -238,7 +220,7 @@ if __name__ == "__main__":
 
             critic_optimizer.zero_grad()
             critic_loss.backward()
-            clip_grad_norm = torch.nn.utils.clip_grad_norm_(critic.parameters(), max_norm=3.0)
+            critic_grad_norm = torch.nn.utils.clip_grad_norm_(critic.parameters(), max_norm=3.0)
             critic_optimizer.step()
             # Logging
             actor_loss_his.append(actor_loss.mean().item())
@@ -268,8 +250,8 @@ if __name__ == "__main__":
             print(f"📦 Batch {sample_batch_count:03d} | Steps: {total_steps} | Success: {batch_success_rate:.1%}")
             print(f"🧠 Policy  -> Loss: {actor_loss.item():.4f} | Entropy: {entropy.mean().item():.3f} | Avg KL: {np.mean(kl_list):.4f} | ClipFrac: {np.mean(clip_list):.1%}")
             print(f"💰 Critic  -> Loss: {critic_loss.item():.4f} | ExplainedVar: {exp_var.item():.3f} | TargetAbsMean: {critic_target.abs().mean().item():.2f}")
-            print(f"⚖️ GAE     -> A_std: {A_RAW_std:.3f} | r_std: {reward_std:.3f} | Ratio(A/r): {ratio_a_r:.2f} (in theory≈2.94)")
-            print(f"📉 Grad    -> Actor: {actor_grad_norm:.3f} | Critic: {clip_grad_norm:.3f}")
+            print(f"⚖️ GAE     -> A_std: {A_RAW_std:.3f} | r_std: {reward_std:.3f} | Ratio(A/r): {ratio_a_r:.2f}")
+            print(f"📉 Grad    -> Actor: {actor_grad_norm:.3f} | Critic: {critic_grad_norm:.3f}")
             print(f"[Grad Scale] Actor raw grad: {grad_scale:.4f} | After clip: {actor_grad_norm:.4f}")
             print(f"{'='*70}")
 
@@ -281,7 +263,7 @@ if __name__ == "__main__":
                 'batch_success_rate': [batch_success_rate] * len(batch_state),
                 'A': A.cpu().numpy().tolist(),
                 'old_log_prob': old_log_prob.cpu().numpy().tolist(),
-                'actor_outout': actor_outout.detach().cpu().numpy().tolist(),
+                'actor_output': actor_output.detach().cpu().numpy().tolist(),
                 'new_log_prob': new_log_prob.detach().cpu().numpy().tolist(),
                 'rt': rt.detach().cpu().numpy().tolist(),
                 'clip_loss': [clip_loss.detach().item()] * len(batch_state),
@@ -290,7 +272,7 @@ if __name__ == "__main__":
                 'critic_loss': [critic_loss.detach().item()] * len(batch_state),
                 'actor_loss': [actor_loss.detach().item()] * len(batch_state),
                 'actor_grad_norm': [actor_grad_norm] * len(batch_state),
-                'clip_grad_norm': [clip_grad_norm] * len(batch_state),
+                'critic_grad_norm': [critic_grad_norm] * len(batch_state),
             }
             df = pd.DataFrame(data)
             df.to_csv(f"{output_dir}/batch_log_{sample_batch_count}.csv", index=False)
@@ -301,6 +283,9 @@ if __name__ == "__main__":
     # Save network weights
     torch.save(actor.state_dict(), f"{output_dir}/ppo_push_actor.pth")
     torch.save(critic.state_dict(), f"{output_dir}/ppo_push_critic.pth")
+
+    # Save ObsNormalizer state
+    obs_normalizer.save(f"{output_dir}/ppo_push_normalizer.pkl")
 
     # Merge all batch log CSVs into a total CSV
     all_files = glob.glob(f"{output_dir}/batch_log_*.csv")
