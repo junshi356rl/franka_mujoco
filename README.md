@@ -19,8 +19,15 @@ While the core follows the original PPO clipped surrogate objective, this implem
 ## Test results:
 The algorithm converges to a success rate of approximately 95% after 2.5 million steps. When the Franka arm’s physical limitations prevent the cube from reaching the exact target, the system consistently positions it at the closest feasible location to the goal.
 
+Batch Success Rate:
+![success rate](docs/PPO/batch_success_rate.png)
+
 Rollout Visualization:
-<img src="./docs/PPO/push_PPO.gif" alt=""/>
+![demo](docs/PPO/push_ppo_compressed.gif)
+
+Rollout Visualization Snapshots:
+![snap0](docs/PPO/snapshot0.jpg)
+![snap1](docs/PPO/snapshot1.jpg)
 
 ## Usage
 
